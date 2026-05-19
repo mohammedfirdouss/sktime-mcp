@@ -81,6 +81,40 @@ logger = logging.getLogger(__name__)
 # Create MCP server instance
 server = Server("sktime-mcp")
 
+_CHARS_PER_TOKEN = 4
+
+
+def _apply_response_token_limit(tool_name: str, text: str) -> str:
+    """Truncate *text* to the configured token budget and append a notice.
+
+    Reads ``SKTIME_MCP_MAX_RESPONSE_TOKENS`` from environment variable at call time so
+    that live config changes are respected.
+    Returns *text* unchanged when the limit is 0 (unlimited) or not set.
+    """
+    raw = os.environ.get("SKTIME_MCP_MAX_RESPONSE_TOKENS", "0")
+    try:
+        max_tokens = int(raw)
+    except ValueError:
+        max_tokens = 0
+
+    if max_tokens <= 0:
+        return text  # unlimited
+
+    max_chars = max_tokens * _CHARS_PER_TOKEN
+    if len(text) <= max_chars:
+        return text
+
+    notice = (
+        f"\n\n[sktime-mcp] Response truncated: output exceeded the SKTIME_MCP_MAX_RESPONSE_TOKENS "
+        f"limit of {max_tokens} tokens (tool: {tool_name}). "
+        "Increase SKTIME_MCP_MAX_RESPONSE_TOKENS or narrow your query for full results."
+    )
+    # Reserve space for the notice inside the budget
+    budget = max_chars - len(notice)
+    if budget < 0:
+        budget = 0
+    return text[:budget] + notice
+
 
 def sanitize_for_json(obj):
     """Recursively convert objects to JSON-serializable format.
@@ -792,7 +826,10 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         sanitized_result = sanitize_for_json(result)
         logger.info(f"{json.dumps(sanitized_result, indent=2, default=str)}")
 
-        return [TextContent(type="text", text=json.dumps(sanitized_result, indent=2, default=str))]
+        response_text = json.dumps(sanitized_result, indent=2, default=str)
+        truncated_text = _apply_response_token_limit(name, response_text)
+
+        return [TextContent(type="text", text=truncated_text)]
     except Exception as e:
         logger.exception(f"Error in tool {name}")
         return [TextContent(type="text", text=json.dumps({"success": False, "error": str(e)}))]
