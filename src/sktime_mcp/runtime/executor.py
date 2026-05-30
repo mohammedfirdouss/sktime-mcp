@@ -9,7 +9,8 @@ import asyncio
 import inspect
 import logging
 import uuid
-from typing import Any
+import os
+from typing import Any, Optional
 
 import pandas as pd
 
@@ -82,11 +83,9 @@ class Executor:
         self._handle_manager = get_handle_manager()
         self._job_manager = get_job_manager()
         self._data_handles: dict[str, Any] = {}
-        self._max_data_handles: int = int(
-            os.environ.get("SKTIME_MCP_MAX_DATA_HANDLES", "50")
-        )
         from sktime_mcp.config import settings
 
+        self._max_data_handles = settings.max_data_handles
         self._auto_format_enabled = settings.auto_format
 
     def _cleanup_oldest_data(self, count: int = 10) -> None:
@@ -648,7 +647,8 @@ class Executor:
                     )
                     if format_result["success"]:
                         # Free the raw handle — the formatted copy supersedes it
-                        del self._data_handles[data_handle]
+                        if data_handle in self._data_handles:
+                            del self._data_handles[data_handle]
                         return {
                             "success": True,
                             "data_handle": format_result["data_handle"],
