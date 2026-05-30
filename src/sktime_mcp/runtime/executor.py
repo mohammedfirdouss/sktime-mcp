@@ -74,10 +74,24 @@ class Executor:
         self._registry = get_registry()
         self._handle_manager = get_handle_manager()
         self._job_manager = get_job_manager()
-        self._data_handles = {}  # Store data handles
+        self._data_handles: dict[str, Any] = {}
+        self._max_data_handles: int = int(
+            os.environ.get("SKTIME_MCP_MAX_DATA_HANDLES", "50")
+        )
         from sktime_mcp.config import settings
 
         self._auto_format_enabled = settings.auto_format
+
+    def _cleanup_oldest_data(self, count: int = 10) -> None:
+        to_remove = list(self._data_handles.keys())[:count]
+        for handle_id in to_remove:
+            del self._data_handles[handle_id]
+            logger.debug("Evicted data handle %s (limit=%d)", handle_id, self._max_data_handles)
+
+    def _register_data_handle(self, handle_id: str, data: dict[str, Any]) -> None:
+        if len(self._data_handles) >= self._max_data_handles:
+            self._cleanup_oldest_data(count=max(1, self._max_data_handles // 5))
+        self._data_handles[handle_id] = data
 
     def instantiate(
         self,
@@ -602,14 +616,14 @@ class Executor:
             # Generate handle
             data_handle = f"data_{uuid.uuid4().hex[:8]}"
 
-            # Store
-            self._data_handles[data_handle] = {
+            # Store (enforces max_data_handles limit)
+            self._register_data_handle(data_handle, {
                 "y": y,
                 "X": X,
                 "metadata": metadata,
                 "validation": validation_report,
-                "config": config,  # Store config for reference
-            }
+                "config": config,
+            })
 
             # Apply auto-formatting if enabled
             if getattr(self, "_auto_format_enabled", True):
@@ -724,13 +738,13 @@ class Executor:
             metadata["dtypes"] = {col: str(dtype) for col, dtype in data.dtypes.items()}
             data_handle = f"data_{uuid.uuid4().hex[:8]}"
 
-            self._data_handles[data_handle] = {
+            self._register_data_handle(data_handle, {
                 "y": y,
                 "X": X,
                 "metadata": metadata,
                 "validation": validation_report,
                 "config": config,
-            }
+            })
 
             # auto-format if enabled
             if getattr(self, "_auto_format_enabled", True):
@@ -868,8 +882,7 @@ class Executor:
         # Generate new handle
         new_handle = f"data_{uuid.uuid4().hex[:8]}"
 
-        # Store formatted data
-        self._data_handles[new_handle] = {
+        new_data = {
             "y": y,
             "X": X,
             "metadata": {
@@ -884,11 +897,16 @@ class Executor:
             "config": data_info.get("config", {}),
             "original_handle": data_handle,
         }
+        self._register_data_handle(new_handle, new_data)
+
+        # Release the original to prevent intermediate handles from accumulating
+        if data_handle in self._data_handles:
+            del self._data_handles[data_handle]
 
         return {
             "success": True,
             "data_handle": new_handle,
-            "metadata": self._data_handles[new_handle]["metadata"],
+            "metadata": new_data["metadata"],
             "changes_made": changes_made,
         }
 
